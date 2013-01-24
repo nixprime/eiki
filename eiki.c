@@ -1356,6 +1356,9 @@ end:
 #endif /* EIKI_NO_BINUTILS */
 }
 
+#ifdef __GNUC__
+__attribute__((__noinline__))
+#endif
 eiki_stack_frame *eiki_get_stack_trace(size_t max_depth, size_t skip_count,
     size_t *depth) {
   void **addr_buffer = NULL;
