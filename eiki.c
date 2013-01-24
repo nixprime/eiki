@@ -31,6 +31,7 @@
 #include <sys/wait.h>
 #include <ucontext.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stddef.h>
@@ -75,6 +76,14 @@
 #ifndef EIKI_CXXFILT_PATH
   #define EIKI_CXXFILT_PATH EIKI_BINUTILS_DIR "c++filt"
 #endif
+
+/** Path to `gdb(1)`. */
+#ifndef EIKI_GDB_PATH
+  #define EIKI_GDB_PATH "/usr/bin/gdb"
+#endif
+
+/** Drop to a debugger on crash if we're on a tty? */
+#define EIKI_GDB_IF_TTY
 
 /*****************************************************************************
  * Assertions
@@ -297,6 +306,59 @@ fail:
   return NULL;
 }
 
+/**
+ * Run the program `file` with the arguments `argv` asynchronously, and return
+ * control to the caller. The child's pid is returned on success, and -1 is
+ * returned on failure.
+ */
+static pid_t eiki_execv_async(const char *file, char *const argv[]) {
+  int rv;
+  pid_t pid;
+  int success_pipe_fd[2] = { -1, -1 };
+
+  rv = pipe(success_pipe_fd);
+  if (rv) {
+    goto fail;
+  }
+
+  pid = fork();
+  if (pid < 0) {
+    goto fail;
+  } else if (!pid) { /* In child */
+    char *envp[] = { NULL };
+    char junk[1] = { 0 };
+    eiki_close(success_pipe_fd[0]);
+    /* set pipe write-end as close-on-exec to communicate exec success
+     * to parent via EOF */
+    fcntl(success_pipe_fd[1], F_SETFD, fcntl(success_pipe_fd[1], F_GETFD) | FD_CLOEXEC);
+    rv = execve(file, argv, envp);
+    /* execve failed: indicate error to parent */
+    eiki_write(success_pipe_fd[1], junk, sizeof(junk));
+    _exit(EXIT_FAILURE);
+  }
+  else { /* In parent */
+    /* wait for either EOF or data on pipe from child */
+    ssize_t len;
+    char buf[1];
+    eiki_close(success_pipe_fd[1]);
+    len = eiki_read(success_pipe_fd[0], buf, sizeof(buf));
+    if (len) {
+      goto fail;
+    }
+    eiki_close(success_pipe_fd[0]);
+    return pid;
+  }
+
+fail:
+  if (success_pipe_fd[0] >= 0) {
+    eiki_close(success_pipe_fd[0]);
+  }
+  if (success_pipe_fd[1] >= 0) {
+    eiki_close(success_pipe_fd[1]);
+  }
+  return -1;
+}
+
 void eiki_print_s(const char* s) {
   eiki_write(STDERR_FILENO, s, eiki_strlen(s));
 }
@@ -449,6 +511,11 @@ static void eiki_print_pid_prefix() {
   eiki_print_s("==");
   eiki_print_d(getpid());
   eiki_print_s("== ");
+}
+
+/** determine whether stdin is a tty. */
+int eiki_in_is_tty() {
+  return isatty(STDIN_FILENO);
 }
 
 /*****************************************************************************
@@ -896,6 +963,13 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
   eiki_print_pid_prefix(); eiki_print_signal(signum, info);
   eiki_print_pid_prefix(); eiki_print_stack_trace(0);
   eiki_print_pid_prefix(); eiki_print_context(context);
+
+#ifdef EIKI_GDB_IF_TTY
+  if (eiki_in_is_tty()) {
+    eiki_gdb();
+    _exit(1);
+  }
+#endif
   abort();
 }
 
@@ -932,6 +1006,50 @@ int eiki_install_signal_handler() {
     }
   }
   return 0;
+}
+
+/*****************************************************************************
+ * Debugger support
+ *****************************************************************************/
+
+/* forward decl */
+static int eiki_pid_to_str(pid_t pid, char *str);
+
+void eiki_gdb() {
+  pid_t gdb_pid = -1;
+  pid_t pid;
+  char pid_str[16];
+  char *argv[] = { NULL, NULL, NULL, NULL };
+
+  /* construct command line: gdb <my_binary> <my_pid> */
+  argv[0] = eiki_malloc(4);
+  if (!argv[0]) {
+    goto end;
+  }
+  eiki_strcpy(argv[0], "gdb");
+  argv[1] = eiki_malloc(32);
+  if (!argv[1]) {
+    goto end;
+  }
+  eiki_strcpy(argv[1], "/proc/");
+  pid = getpid();
+  eiki_pid_to_str(pid, pid_str);
+  eiki_strcat(argv[1], pid_str);
+  eiki_strcat(argv[1], "/exe");
+  argv[2] = eiki_malloc(16);
+  if (!argv[2]) {
+    goto end;
+  }
+  eiki_strcpy(argv[2], pid_str);
+
+  gdb_pid = eiki_execv_async(EIKI_GDB_PATH, argv);
+  if (gdb_pid != -1) {
+    int status;
+    waitpid(gdb_pid, &status, 0);
+  }
+
+end:
+  return;
 }
 
 /*****************************************************************************

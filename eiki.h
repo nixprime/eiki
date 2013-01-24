@@ -67,6 +67,9 @@ void eiki_print_zx(size_t zx);
  */
 void eiki_print_p(const void* ptr);
 
+/** determine whether stdin is a tty. */
+int eiki_in_is_tty();
+
 /*****************************************************************************
  * Memory management
  *****************************************************************************/
@@ -117,6 +120,13 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
  * If successful, returns 0. Otherwise, returns -1, and errno is set.
  */
 int eiki_install_signal_handler();
+
+/*****************************************************************************
+ * Debugger support
+ *****************************************************************************/
+
+/** drop into a debugger, even if we were not run from one. */
+void eiki_gdb();
 
 /*****************************************************************************
  * Stack traces
