@@ -43,6 +43,9 @@ The following preprocessor flags affect Eiki's behavior:
   not configure an alternate stack for `eiki_signal_handler()`, which means
   that stack overflows cannot be handled.
 
+- If EIKI\_GDB\_IF\_TTY is defined, `eiki_signal_handler()` will attempt to
+  drop into GDB before aborting.
+
 - EIKI\_PRINT\_STACK\_FRAMES defines the maximum number of stack frames that
   will be shown by `eiki_print_stack_trace()`. The default is 64.
 
@@ -54,6 +57,8 @@ The following preprocessor flags affect Eiki's behavior:
   `addr2line(1)` and `c++filt(1)` respectively, and default to
   EIKI\_BINUTILS\_DIR + "addr2line" and EIKI\_BINUTILS\_DIR + "c++filt", where
   EIKI\_BINUTILS\_DIR defaults to "/usr/bin/".
+
+- EIKI\_GDB\_PATH defines the pathname of `gdb(1)`. Defaults to "/usr/bin/gdb".
 
 License and Third-Party Notices
 ===============================
@@ -79,4 +84,7 @@ Eiki is provided under the MIT license:
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
+
+EIKI\_GDB\_IF\_TTY and `eiki_gdb` were implemented by Chris Fallin
+(https://github.com/cfallin/).
 

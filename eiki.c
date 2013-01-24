@@ -82,9 +82,6 @@
   #define EIKI_GDB_PATH "/usr/bin/gdb"
 #endif
 
-/** Drop to a debugger on crash if we're on a tty? */
-#define EIKI_GDB_IF_TTY
-
 /*****************************************************************************
  * Assertions
  *****************************************************************************/
@@ -168,6 +165,39 @@ static char eiki_hex_char(unsigned char x) {
   } else {
     return x + 'a' - 10;
   }
+}
+
+/**
+ * Stringify `pid`. `str` must be a buffer of length at least 12 bytes
+ * (assuming pid_t is 32 bits). If pid is negative, sets `*str` to an empty
+ * string and returns 0; otherwise sets `*str` to a string containing the value
+ * of `pid` and returns 1.
+ */
+static int eiki_pid_to_str(pid_t pid, char *str) {
+  size_t digits;
+  char *ptr;
+  EIKI_STATIC_ASSERT(sizeof(pid_t) * CHAR_BIT <= 32);
+  EIKI_STATIC_ASSERT(sizeof(size_t) >= sizeof(pid_t)); /* laziness: (1) */
+  EIKI_ASSERT(str);
+  if (!pid) {
+    str[0] = '0';
+    str[1] = '\0';
+    return 1;
+  } else if (pid < 0) {
+    str[0] = '\0';
+    return 0;
+  }
+  digits = eiki_strlen_zu((size_t)pid); /* (1) */
+  str[digits] = '\0';
+  ptr = &str[digits];
+  while (pid) {
+    ptr--;
+    EIKI_ASSERT(ptr >= str);
+    *ptr = (pid % 10) + '0';
+    pid /= 10;
+  }
+  EIKI_ASSERT(ptr == str);
+  return 1;
 }
 
 /*****************************************************************************
@@ -254,10 +284,25 @@ static char *eiki_execv(const char *file, char *const argv[]) {
   pid = fork();
   if (pid < 0) {
     goto fail;
-  } else if (pid) { /* In parent */
+  } else if (!pid) { /* In child */
+    char *envp[] = { NULL };
+    eiki_close(pipe_fd[0]);
+    eiki_close(STDERR_FILENO);
+    eiki_close(STDIN_FILENO);
+    rv = eiki_dup2(pipe_fd[1], STDOUT_FILENO);
+    if (rv < 0) {
+      _exit(EXIT_FAILURE);
+    }
+    eiki_close(pipe_fd[1]);
+    rv = execve(file, argv, envp);
+    /* If we get here, execve failed */
+    _exit(EXIT_FAILURE);
+  } else { /* In parent */
     int status;
     int pipe_len;
     ssize_t sz;
+    eiki_close(pipe_fd[1]);
+    pipe_fd[1] = -1;
     rv = (int)waitpid(pid, &status, 0);
     if (rv <= 0) {
       goto fail;
@@ -279,20 +324,7 @@ static char *eiki_execv(const char *file, char *const argv[]) {
     }
     buf[sz] = '\0';
     eiki_close(pipe_fd[0]);
-    eiki_close(pipe_fd[1]);
     return buf;
-  } else { /* In child */
-    char *envp[] = { NULL };
-    eiki_close(STDERR_FILENO);
-    eiki_close(STDIN_FILENO);
-    rv = eiki_dup2(pipe_fd[1], STDOUT_FILENO);
-    if (rv < 0) {
-      /* Parent will clean up pipe_fd[1] */
-      _exit(EXIT_FAILURE);
-    }
-    rv = execve(file, argv, envp);
-    /* If we get here, execve failed */
-    _exit(EXIT_FAILURE);
   }
 
 fail:
@@ -327,20 +359,29 @@ static pid_t eiki_execv_async(const char *file, char *const argv[]) {
   } else if (!pid) { /* In child */
     char *envp[] = { NULL };
     char junk[1] = { 0 };
+    int fflags;
     eiki_close(success_pipe_fd[0]);
     /* set pipe write-end as close-on-exec to communicate exec success
      * to parent via EOF */
-    fcntl(success_pipe_fd[1], F_SETFD, fcntl(success_pipe_fd[1], F_GETFD) | FD_CLOEXEC);
+    fflags = fcntl(success_pipe_fd[1], F_GETFD);
+    if (fflags == -1) {
+      goto child_fail;
+    }
+    rv = fcntl(success_pipe_fd[1], F_SETFD, fflags | FD_CLOEXEC);
+    if (rv == -1) {
+      goto child_fail;
+    }
     rv = execve(file, argv, envp);
     /* execve failed: indicate error to parent */
+child_fail:
     eiki_write(success_pipe_fd[1], junk, sizeof(junk));
     _exit(EXIT_FAILURE);
-  }
-  else { /* In parent */
+  } else { /* In parent */
     /* wait for either EOF or data on pipe from child */
     ssize_t len;
     char buf[1];
     eiki_close(success_pipe_fd[1]);
+    success_pipe_fd[1] = -1;
     len = eiki_read(success_pipe_fd[0], buf, sizeof(buf));
     if (len) {
       goto fail;
@@ -513,8 +554,7 @@ static void eiki_print_pid_prefix() {
   eiki_print_s("== ");
 }
 
-/** determine whether stdin is a tty. */
-int eiki_in_is_tty() {
+int eiki_stdin_is_tty() {
   return isatty(STDIN_FILENO);
 }
 
@@ -963,11 +1003,9 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
   eiki_print_pid_prefix(); eiki_print_signal(signum, info);
   eiki_print_pid_prefix(); eiki_print_stack_trace(0);
   eiki_print_pid_prefix(); eiki_print_context(context);
-
 #ifdef EIKI_GDB_IF_TTY
-  if (eiki_in_is_tty()) {
+  if (eiki_stdin_is_tty()) {
     eiki_gdb();
-    _exit(1);
   }
 #endif
   abort();
@@ -1012,10 +1050,7 @@ int eiki_install_signal_handler() {
  * Debugger support
  *****************************************************************************/
 
-/* forward decl */
-static int eiki_pid_to_str(pid_t pid, char *str);
-
-void eiki_gdb() {
+int eiki_gdb() {
   pid_t gdb_pid = -1;
   pid_t pid;
   char pid_str[16];
@@ -1044,12 +1079,14 @@ void eiki_gdb() {
 
   gdb_pid = eiki_execv_async(EIKI_GDB_PATH, argv);
   if (gdb_pid != -1) {
-    int status;
-    waitpid(gdb_pid, &status, 0);
+    waitpid(gdb_pid, NULL, 0);
   }
 
 end:
-  return;
+  eiki_free(argv[0]);
+  eiki_free(argv[1]);
+  eiki_free(argv[2]);
+  return (gdb_pid != -1);
 }
 
 /*****************************************************************************
@@ -1172,39 +1209,6 @@ fail:
   }
   lseek(fd, orig_pos, SEEK_SET);
   return -1;
-}
-
-/**
- * Stringify `pid`. `str` must be a buffer of length at least 12 bytes
- * (assuming pid_t is 32 bits). If pid is negative, sets `*str` to an empty
- * string and returns 0; otherwise sets `*str` to a string containing the value
- * of `pid` and returns 1.
- */
-static int eiki_pid_to_str(pid_t pid, char *str) {
-  size_t digits;
-  char *ptr;
-  EIKI_STATIC_ASSERT(sizeof(pid_t) * CHAR_BIT <= 32);
-  EIKI_STATIC_ASSERT(sizeof(size_t) >= sizeof(pid_t)); /* laziness: (1) */
-  EIKI_ASSERT(str);
-  if (!pid) {
-    str[0] = '0';
-    str[1] = '\0';
-    return 1;
-  } else if (pid < 0) {
-    str[0] = '\0';
-    return 0;
-  }
-  digits = eiki_strlen_zu((size_t)pid); /* (1) */
-  str[digits] = '\0';
-  ptr = &str[digits];
-  while (pid) {
-    ptr--;
-    EIKI_ASSERT(ptr >= str);
-    *ptr = (pid % 10) + '0';
-    pid /= 10;
-  }
-  EIKI_ASSERT(ptr == str);
-  return 1;
 }
 
 /**

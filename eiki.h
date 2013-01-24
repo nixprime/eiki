@@ -67,8 +67,8 @@ void eiki_print_zx(size_t zx);
  */
 void eiki_print_p(const void* ptr);
 
-/** determine whether stdin is a tty. */
-int eiki_in_is_tty();
+/** Returns 1 if stdin is a tty (interactive) and 0 otherwise. */
+int eiki_stdin_is_tty();
 
 /*****************************************************************************
  * Memory management
@@ -105,6 +105,7 @@ void eiki_print_context(const ucontext_t *context);
  * - Calls `eiki_print_signal(signum, info)`.
  * - Calls `eiki_print_stack_trace(0)`.
  * - Calls `eiki_print_context(context)`.
+ * - If EIKI_GDB_IF_TTY is defined and stdin is a tty, calls `eiki_gdb()`.
  * - Calls `abort()`.
  */
 void eiki_signal_handler(int signum, const siginfo_t *info,
@@ -114,7 +115,7 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
  * Set `eiki_signal_handler()` as the default handler for SIGILL (illegal
  * instruction), SIGFPE (floating point exception), SIGSEGV (segmentation
  * violation), SIGBUS (bus error), and SIGSYS (bad argument to syscall). In
- * In addition, if EIKI_NO_SIGNAL_STACK is not defined, set up an alternative
+ * addition, if EIKI_NO_SIGNAL_STACK is not defined, set up an alternative
  * signal stack and set `eiki_signal_handler()` to run on it.
  *
  * If successful, returns 0. Otherwise, returns -1, and errno is set.
@@ -125,8 +126,13 @@ int eiki_install_signal_handler();
  * Debugger support
  *****************************************************************************/
 
-/** drop into a debugger, even if we were not run from one. */
-void eiki_gdb();
+/**
+ * Drop into a debugger, even if we were not run from one. If successful,
+ * `eiki_gdb()` will not return until the debugger terminates. If
+ * unsuccessful, `eiki_gdb()` will return immediately. Returns 1 on success and
+ * 0 on failure.
+ */
+int eiki_gdb();
 
 /*****************************************************************************
  * Stack traces
