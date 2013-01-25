@@ -88,7 +88,7 @@
 
 static void eiki_assertion_failed(const char* msg) {
   eiki_print_s(msg);
-  abort();
+  eiki_abort();
 }
 
 #define EIKI_PP_STRINGIFY(X) EIKI_PP_STRINGIFY_(X)
@@ -721,6 +721,7 @@ void eiki_free(const void *ptr) {
 
 /** Signals caught by `eiki_install_signal_handler()`. */
 static const int EIKI_INSTALLED_SIGNALS[] = {
+  SIGABRT,
   SIGILL,
   SIGFPE,
   SIGSEGV,
@@ -1008,7 +1009,7 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
     eiki_gdb();
   }
 #endif
-  abort();
+  eiki_abort();
 }
 
 int eiki_install_signal_handler() {
@@ -1044,6 +1045,11 @@ int eiki_install_signal_handler() {
     }
   }
   return 0;
+}
+
+void eiki_abort() {
+  signal(SIGABRT, SIG_DFL);
+  abort();
 }
 
 /*****************************************************************************

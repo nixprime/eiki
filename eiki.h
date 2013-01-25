@@ -114,9 +114,9 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
 /**
  * Set `eiki_signal_handler()` as the default handler for SIGILL (illegal
  * instruction), SIGFPE (floating point exception), SIGSEGV (segmentation
- * violation), SIGBUS (bus error), and SIGSYS (bad argument to syscall). In
- * addition, if EIKI_NO_SIGNAL_STACK is not defined, set up an alternative
- * signal stack and set `eiki_signal_handler()` to run on it.
+ * violation), SIGBUS (bus error), SIGSYS (bad argument to syscall), and
+ * SIGABRT (aborted). In addition, if EIKI_NO_SIGNAL_STACK is not defined, set
+ * up an alternative signal stack and set `eiki_signal_handler()` to run on it.
  *
  * If successful, returns 0. Otherwise, returns -1, and errno is set.
  */
