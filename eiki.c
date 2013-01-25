@@ -902,6 +902,7 @@ static const char *eiki_sigsegv_info(int code) {
 void eiki_print_signal(int signum, const siginfo_t *info) {
   const char *siginfo = NULL;
   int sigcode;
+  int info_has_addr = 0;
   eiki_print_s("Caught signal ");
   eiki_print_d(signum);
   eiki_print_s(" (");
@@ -915,23 +916,31 @@ void eiki_print_signal(int signum, const siginfo_t *info) {
     switch (signum) {
       case SIGILL:
         siginfo = eiki_sigill_info(sigcode);
+        info_has_addr = 1;
         break;
 #ifdef SIGBUS
       case SIGBUS:
         siginfo = eiki_sigbus_info(sigcode);
+        info_has_addr = 1;
         break;
 #endif
       case SIGFPE:
         siginfo = eiki_sigfpe_info(sigcode);
+        info_has_addr = 1;
         break;
       case SIGSEGV:
         siginfo = eiki_sigsegv_info(sigcode);
+        info_has_addr = 1;
         break;
     }
   }
   if (siginfo) {
     eiki_print_s(": ");
     eiki_print_s(siginfo);
+  }
+  if (info_has_addr) {
+    eiki_print_s(" at address ");
+    eiki_print_p(info->si_addr);
   }
   eiki_print_s(")\n");
 }
