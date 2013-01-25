@@ -24,6 +24,10 @@
 #ifndef EIKI_H_
 #define EIKI_H_
 
+#include <signal.h>
+#include <ucontext.h>
+#include <stdlib.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -90,10 +94,6 @@ void eiki_free(const void *ptr);
  * Signals
  *****************************************************************************/
 
-/* Forward declarations. */
-struct siginfo_t;
-struct ucontext_t;
-
 /** Print information about the given caught signal. */
 void eiki_print_signal(int signum, const siginfo_t *info);
 
@@ -121,6 +121,13 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
  * If successful, returns 0. Otherwise, returns -1, and errno is set.
  */
 int eiki_install_signal_handler();
+
+/**
+ * Aborts the program via SIGABRT, unregistering any existing signal handler
+ * for SIGABRT first. (Self-terminating via SIGABRT rather than, say, SIGKILL
+ * matters because SIGABRT's default signal handler dumps core.)
+ */
+void eiki_abort();
 
 /*****************************************************************************
  * Debugger support
