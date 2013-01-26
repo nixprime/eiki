@@ -33,6 +33,22 @@ extern "C" {
 #endif
 
 /*****************************************************************************
+ * Memory management
+ *****************************************************************************/
+
+/**
+ * As `malloc()`, but allocates out of a much smaller heap and is reentrant
+ * (and hence both thread-safe and async-signal-safe).
+ */
+void *eiki_malloc(size_t sz);
+
+/**
+ * As `free`, but usable only for memory obtained from `eiki_malloc()`. Is also
+ * reentrant.
+ */
+void eiki_free(const void *ptr);
+
+/*****************************************************************************
  * I/O
  *****************************************************************************/
 
@@ -73,22 +89,6 @@ void eiki_print_p(const void* ptr);
 
 /** Returns 1 if stdin is a tty (interactive) and 0 otherwise. */
 int eiki_stdin_is_tty();
-
-/*****************************************************************************
- * Memory management
- *****************************************************************************/
-
-/**
- * As `malloc()`, but allocates out of a much smaller heap and is reentrant
- * (and hence both thread-safe and async-signal-safe).
- */
-void *eiki_malloc(size_t sz);
-
-/**
- * As `free`, but usable only for memory obtained from `eiki_malloc()`. Is also
- * reentrant.
- */
-void eiki_free(const void *ptr);
 
 /*****************************************************************************
  * Signals

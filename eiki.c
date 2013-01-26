@@ -113,6 +113,17 @@ static void eiki_assertion_failed(const char* msg) {
  * String manipulation
  *****************************************************************************/
 
+/** Internal version of `memcpy(3)`, which is not async-signal-safe. */
+static void *eiki_memcpy(void *dest, const void *src, size_t n) {
+  char *dest_ = (char *)dest;
+  const char *src_ = (char *)src;
+  size_t i;
+  for (i = 0; i < n; i++) {
+    dest_[i] = src_[i];
+  }
+  return dest;
+}
+
 /** Internal version of `strcpy(3)`, which is not async-signal-safe. */
 static char *eiki_strcpy(char *dest, const char *src) {
   size_t i;
@@ -198,6 +209,163 @@ static int eiki_pid_to_str(pid_t pid, char *str) {
   }
   EIKI_ASSERT(ptr == str);
   return 1;
+}
+
+/*****************************************************************************
+ * Memory management. `eiki_malloc` and `eiki_free` serve memory out of a
+ * statically-allocated reserve heap, since `malloc` and `free` cannot be
+ * safely called during a crash / within a signal handler.
+ *
+ * The current implementation of Eiki's heap is thread-safe and
+ * async-signal-safe, does not require locks (or pthreads), and is relatively
+ * simple. Space efficiency and performance are sacrificed to achieve this.
+ *
+ * The heap, which is of size `EIKI_HEAP_BYTES`, is divided into blocks
+ * `EIKI_HEAP_BLOCK_BYTES` in size. Each block is associated with an int "tag".
+ * The tag is 0 when the block is unallocated, and non-zero when the block is
+ * allocated; specifically, the first block in a contiguous allocation has tag
+ * equal to the number of blocks in the allocation, and all remaining blocks
+ * have tag -1.
+ *****************************************************************************/
+
+/**
+ * Size of the Eiki heap in chars. Defaults to 2MB (assuming CHAR_BIT = 8).
+ * Must be an integer multiple of EIKI_HEAP_BLOCK_SIZE and
+ * sizeof(eiki_heap_type).
+ */
+#ifndef EIKI_HEAP_SIZE
+  #define EIKI_HEAP_SIZE 2097152
+#endif
+
+/** Size of each block in the Eiki heap in chars. */
+#ifndef EIKI_HEAP_BLOCK_SIZE
+  #define EIKI_HEAP_BLOCK_SIZE 64
+#endif
+
+/** Number of blocks in the Eiki heap. */
+#define EIKI_HEAP_BLOCKS (EIKI_HEAP_SIZE / EIKI_HEAP_BLOCK_SIZE)
+
+/**
+ * The type used to instantiate the Eiki heap. The heap isn't just
+ * unsigned char[EIKI_HEAP_SIZE] due to alignment restrictions.
+ */
+
+typedef union {
+#ifdef HAVE_LONG_LONG_INT
+  unsigned long long val;
+#else
+  unsigned long val;
+#endif
+  void *ptr;
+#ifdef EIKI_HEAP_ALIGNMENT_TYPE
+  EIKI_HEAP_ALIGNMENT_TYPE other;
+#endif
+} eiki_heap_min_type;
+
+typedef struct {
+  eiki_heap_min_type x[EIKI_HEAP_BLOCK_SIZE/sizeof(eiki_heap_min_type)];
+} eiki_heap_block;
+
+/** The heap. */
+static eiki_heap_block eiki_heap[EIKI_HEAP_BLOCKS]
+#ifdef __GNUC__
+    __attribute__((aligned(__BIGGEST_ALIGNMENT__)))
+#endif
+    ;
+
+/** Heap block tags. */
+static int eiki_heap_tags[EIKI_HEAP_BLOCKS];
+
+/** Counter that gets bumped whenever the heap state changes. */
+static int eiki_heap_ctr;
+
+void *eiki_malloc(size_t sz) {
+  if (!sz) {
+    return eiki_heap;
+  }
+  while (1) {
+    eiki_heap_block *head = NULL; /* head of the current free region */
+    size_t cur_sz = 0;
+    size_t i;
+    int begin_ctr, end_ctr;
+    begin_ctr = __sync_fetch_and_add(&eiki_heap_ctr, 0);
+    for (i = 0; i < EIKI_HEAP_BLOCKS; i++) {
+      if (__sync_fetch_and_add(&eiki_heap_tags[i], 0)) {
+        /* Block is allocated */
+        head = NULL;
+        cur_sz = 0;
+      } else { /* Block is unallocated */
+        /* Check for start of free region */
+        if (!head) {
+          head = &eiki_heap[i];
+        }
+        cur_sz += EIKI_HEAP_BLOCK_SIZE;
+        /* Check for satisfied allocation */
+        if (cur_sz >= sz) {
+          size_t head_i;
+          size_t j;
+          int success = 1;
+          EIKI_ASSERT(head);
+          head_i = head - eiki_heap;
+          /* Try to acquire each block */
+          for (j = head_i; j <= i; j++) {
+            int newval;
+            newval = (j == head_i) ? (int)(i - head_i + 1) : -1;
+            if (!__sync_bool_compare_and_swap(&eiki_heap_tags[j], 0, newval)) {
+              size_t k;
+              /* Allocation failure; roll back what we've allocated so far */
+              success = 0;
+              for (k = head_i; k < j; k++) {
+                int old_mem_val, old_val;
+                old_val = (k == head_i) ? (int)(i - head_i + 1) : -1;
+                old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[k],
+                    old_val, 0);
+                EIKI_ASSERT(old_mem_val == old_val);
+              }
+              break;
+            }
+          }
+          if (success) {
+            __sync_fetch_and_add(&eiki_heap_ctr, 1);
+            begin_ctr++;
+            return head;
+          }
+        }
+      }
+    }
+    /* Check if the heap changed while we were examining it, and if so retry */
+    end_ctr = __sync_fetch_and_add(&eiki_heap_ctr, 0);
+    if (begin_ctr == end_ctr) {
+      return NULL;
+    }
+  }
+}
+
+void eiki_free(const void *ptr) {
+  size_t head_i, i, n;
+  int old_mem_val, old_val;
+  if (!ptr) {
+    return;
+  }
+  EIKI_ASSERTF(
+      ((const unsigned char *)ptr - (const unsigned char *)eiki_heap) %
+      EIKI_HEAP_BLOCK_SIZE == 0, "freeing invalid (unaligned) pointer");
+  /* First tag contains allocation size */
+  head_i = (const eiki_heap_block *)ptr - eiki_heap;
+  old_val = __sync_fetch_and_add(&eiki_heap_tags[head_i], 0);
+  EIKI_ASSERTF(old_val >= 0, "invalid head block tag");
+  n = old_val;
+  /* Free first block */
+  old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[head_i], old_val,
+      0);
+  EIKI_ASSERT(old_mem_val == old_val);
+  /* Free remaining blocks */
+  for (i = 1; i < n; i++) {
+    old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[head_i + i], -1,
+        0);
+    EIKI_ASSERT(old_mem_val == -1);
+  }
+  __sync_fetch_and_add(&eiki_heap_ctr, 1);
 }
 
 /*****************************************************************************
@@ -400,15 +568,75 @@ fail:
   return -1;
 }
 
+/**
+ * Read a single line from the file descriptor `fd` into a string allocated
+ * using `eiki_malloc()`, stopping at either a newline or EOF. If reading stops
+ * at a newline, the newline is discarded. On success, returns a pointer to the
+ * dynamically allocated string. On failure, returns null, but data is still
+ * consumed from the file up to the first newline or EOF (unless an I/O error
+ * occurs, in which case the state of the file is undefined.)
+ */
+static char *eiki_readln(int fd) {
+  char *buf = NULL;
+  size_t buf_len = 0;
+  size_t buf_sz = EIKI_HEAP_BLOCK_SIZE;
+  buf = eiki_malloc(buf_sz);
+  if (!buf) {
+    goto fail_finish_line;
+  }
+
+  while (1) {
+    char c;
+    ssize_t sz;
+    sz = eiki_read(fd, &c, 1);
+    if (sz < 0) {
+      goto fail_io;
+    } else if (!sz) {
+      break;
+    } else {
+      EIKI_ASSERT(sz == 1);
+      if (c == '\n') {
+        break;
+      }
+      if (buf_len == buf_sz - 1) { /* reserve space for \0 */
+        /** Allocate a new buffer */
+        char *new_buf;
+        new_buf = eiki_malloc(buf_sz + EIKI_HEAP_BLOCK_SIZE);
+        if (!new_buf) {
+          goto fail_finish_line;
+        }
+        eiki_memcpy(new_buf, buf, buf_sz);
+        eiki_free(buf);
+        buf = new_buf;
+        buf_sz += EIKI_HEAP_BLOCK_SIZE;
+      }
+      buf[buf_len++] = c;
+    }
+  }
+
+  buf[buf_len] = '\0';
+  return buf;
+
+fail_finish_line:
+  while (1) {
+    char c;
+    ssize_t sz;
+    sz = eiki_read(fd, &c, 1);
+    if (sz <= 0 || c == '\n') {
+      break;
+    }
+  }
+fail_io:
+  eiki_free(buf);
+  return NULL;
+}
+
 void eiki_print_s(const char* s) {
   eiki_write(STDERR_FILENO, s, eiki_strlen(s));
 }
 
 void eiki_print_c(char c) {
-  char buf[2];
-  buf[0] = c;
-  buf[1] = '\0';
-  eiki_print_s(buf);
+  eiki_write(STDERR_FILENO, &c, 1);
 }
 
 /*
@@ -556,163 +784,6 @@ static void eiki_print_pid_prefix() {
 
 int eiki_stdin_is_tty() {
   return isatty(STDIN_FILENO);
-}
-
-/*****************************************************************************
- * Memory management. `eiki_malloc` and `eiki_free` serve memory out of a
- * statically-allocated reserve heap, since `malloc` and `free` cannot be
- * safely called during a crash / within a signal handler.
- *
- * The current implementation of Eiki's heap is thread-safe and
- * async-signal-safe, does not require locks (or pthreads), and is relatively
- * simple. Space efficiency and performance are sacrificed to achieve this.
- *
- * The heap, which is of size `EIKI_HEAP_BYTES`, is divided into blocks
- * `EIKI_HEAP_BLOCK_BYTES` in size. Each block is associated with an int "tag".
- * The tag is 0 when the block is unallocated, and non-zero when the block is
- * allocated; specifically, the first block in a contiguous allocation has tag
- * equal to the number of blocks in the allocation, and all remaining blocks
- * have tag -1.
- *****************************************************************************/
-
-/**
- * Size of the Eiki heap in chars. Defaults to 2MB (assuming CHAR_BIT = 8).
- * Must be an integer multiple of EIKI_HEAP_BLOCK_SIZE and
- * sizeof(eiki_heap_type).
- */
-#ifndef EIKI_HEAP_SIZE
-  #define EIKI_HEAP_SIZE 2097152
-#endif
-
-/** Size of each block in the Eiki heap in chars. */
-#ifndef EIKI_HEAP_BLOCK_SIZE
-  #define EIKI_HEAP_BLOCK_SIZE 64
-#endif
-
-/** Number of blocks in the Eiki heap. */
-#define EIKI_HEAP_BLOCKS (EIKI_HEAP_SIZE / EIKI_HEAP_BLOCK_SIZE)
-
-/**
- * The type used to instantiate the Eiki heap. The heap isn't just
- * unsigned char[EIKI_HEAP_SIZE] due to alignment restrictions.
- */
-
-typedef union {
-#ifdef HAVE_LONG_LONG_INT
-  unsigned long long val;
-#else
-  unsigned long val;
-#endif
-  void *ptr;
-#ifdef EIKI_HEAP_ALIGNMENT_TYPE
-  EIKI_HEAP_ALIGNMENT_TYPE other;
-#endif
-} eiki_heap_min_type;
-
-typedef struct {
-  eiki_heap_min_type x[EIKI_HEAP_BLOCK_SIZE/sizeof(eiki_heap_min_type)];
-} eiki_heap_block;
-
-/** The heap. */
-static eiki_heap_block eiki_heap[EIKI_HEAP_BLOCKS]
-#ifdef __GNUC__
-    __attribute__((aligned(__BIGGEST_ALIGNMENT__)))
-#endif
-    ;
-
-/** Heap block tags. */
-static int eiki_heap_tags[EIKI_HEAP_BLOCKS];
-
-/** Counter that gets bumped whenever the heap state changes. */
-static int eiki_heap_ctr;
-
-void *eiki_malloc(size_t sz) {
-  if (!sz) {
-    return eiki_heap;
-  }
-  while (1) {
-    eiki_heap_block *head = NULL; /* head of the current free region */
-    size_t cur_sz = 0;
-    size_t i;
-    int begin_ctr, end_ctr;
-    begin_ctr = __sync_fetch_and_add(&eiki_heap_ctr, 0);
-    for (i = 0; i < EIKI_HEAP_BLOCKS; i++) {
-      if (__sync_fetch_and_add(&eiki_heap_tags[i], 0)) {
-        /* Block is allocated */
-        head = NULL;
-        cur_sz = 0;
-      } else { /* Block is unallocated */
-        /* Check for start of free region */
-        if (!head) {
-          head = &eiki_heap[i];
-        }
-        cur_sz += EIKI_HEAP_BLOCK_SIZE;
-        /* Check for satisfied allocation */
-        if (cur_sz >= sz) {
-          size_t head_i;
-          size_t j;
-          int success = 1;
-          EIKI_ASSERT(head);
-          head_i = head - eiki_heap;
-          /* Try to acquire each block */
-          for (j = head_i; j <= i; j++) {
-            int newval;
-            newval = (j == head_i) ? (int)(i - head_i + 1) : -1;
-            if (!__sync_bool_compare_and_swap(&eiki_heap_tags[j], 0, newval)) {
-              size_t k;
-              /* Allocation failure; roll back what we've allocated so far */
-              success = 0;
-              for (k = head_i; k < j; k++) {
-                int old_mem_val, old_val;
-                old_val = (k == head_i) ? (int)(i - head_i + 1) : -1;
-                old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[k],
-                    old_val, 0);
-                EIKI_ASSERT(old_mem_val == old_val);
-              }
-              break;
-            }
-          }
-          if (success) {
-            __sync_fetch_and_add(&eiki_heap_ctr, 1);
-            begin_ctr++;
-            return head;
-          }
-        }
-      }
-    }
-    /* Check if the heap changed while we were examining it, and if so retry */
-    end_ctr = __sync_fetch_and_add(&eiki_heap_ctr, 0);
-    if (begin_ctr == end_ctr) {
-      return NULL;
-    }
-  }
-}
-
-void eiki_free(const void *ptr) {
-  size_t head_i, i, n;
-  int old_mem_val, old_val;
-  if (!ptr) {
-    return;
-  }
-  EIKI_ASSERTF(
-      ((const unsigned char *)ptr - (const unsigned char *)eiki_heap) %
-      EIKI_HEAP_BLOCK_SIZE == 0, "freeing invalid (unaligned) pointer");
-  /* First tag contains allocation size */
-  head_i = (const eiki_heap_block *)ptr - eiki_heap;
-  old_val = __sync_fetch_and_add(&eiki_heap_tags[head_i], 0);
-  EIKI_ASSERTF(old_val >= 0, "invalid head block tag");
-  n = old_val;
-  /* Free first block */
-  old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[head_i], old_val,
-      0);
-  EIKI_ASSERT(old_mem_val == old_val);
-  /* Free remaining blocks */
-  for (i = 1; i < n; i++) {
-    old_mem_val = __sync_val_compare_and_swap(&eiki_heap_tags[head_i + i], -1,
-        0);
-    EIKI_ASSERT(old_mem_val == -1);
-  }
-  __sync_fetch_and_add(&eiki_heap_ctr, 1);
 }
 
 /*****************************************************************************
