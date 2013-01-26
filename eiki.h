@@ -136,8 +136,8 @@ void eiki_abort();
 /**
  * Drop into a debugger, even if we were not run from one. If successful,
  * `eiki_gdb()` will not return until the debugger terminates. If
- * unsuccessful, `eiki_gdb()` will return immediately. Returns 1 on success and
- * 0 on failure.
+ * unsuccessful, `eiki_gdb()` will return immediately. Returns 0 on success and
+ * -1 on failure.
  */
 int eiki_gdb();
 

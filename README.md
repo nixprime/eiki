@@ -21,7 +21,11 @@ Eiki has no other external dependencies.
 Usage
 =====
 
-See eiki.h.
+See eiki.h for function documentation. In short, most programs can simply call
+`eiki_install_signal_handler()` at the beginning of `main()`. Depending on what
+features are required in your stack traces and whether or not Eiki can use
+`addr2line(1)` and `c++filt(1)`, you may need to compile with debug symbols
+(`-g`) and/or link with `-rdynamic`; see "Stack Traces" below.
 
 The following preprocessor flags affect Eiki's behavior:
 
@@ -59,6 +63,33 @@ The following preprocessor flags affect Eiki's behavior:
   EIKI\_BINUTILS\_DIR defaults to "/usr/bin/".
 
 - EIKI\_GDB\_PATH defines the pathname of `gdb(1)`. Defaults to "/usr/bin/gdb".
+
+Stack Traces
+------------
+
+Stack traces may provide the following information for each frame (in the
+absence of memory exhaustion, and provided `backtrace(3)` and
+`backtrace_symbols_fd(3)` are functioning correctly):
+
+- Return address. This is always available.
+
+- Binary module name. This is available if the binary is not linked with
+  `-static`.
+
+- Function name. This is available if:
+
+  - The binary is not linked with `-static` and is linked with `-rdynamic`; or
+
+  - `addr2line(1)` is available.
+
+  In addition, C++ function names will be demangled if `c++filt(1)` is
+  available.
+
+- Offset of the return address within the function. This is available if the
+  binary is not linked with `-static` and is linked with `-rdynamic`.
+
+- Source filename and line number. This is available if the source file is
+  compiled with `-g` and `addr2line(1)` is available.
 
 License and Third-Party Notices
 ===============================

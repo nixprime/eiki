@@ -21,8 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-/* Required for mkstemp(3) (the manpage says only 200112L is required, but the
- * manpage is wrong) */
+/* Required for `stack_t` and `strsignal(3)` */
 #define _POSIX_C_SOURCE 200809L
 
 #include <execinfo.h>
@@ -58,9 +57,9 @@
 #endif
 
 #ifdef EIKI_SRC_PATHNAMES
-  #define EIKI_ADDR2LINE_SRC_FLAGS "-e"
+  #define EIKI_ADDR2LINE_FLAGS "-fe"
 #else
-  #define EIKI_ADDR2LINE_SRC_FLAGS "-se"
+  #define EIKI_ADDR2LINE_FLAGS "-fse"
 #endif
 
 #ifndef EIKI_BINUTILS_DIR
@@ -422,6 +421,8 @@ static int eiki_close(int fd) {
   return rv;
 }
 
+#ifndef EIKI_NO_BINUTILS
+
 /** Wrapper around `dup2(2)` that retries on EINTR. */
 static int eiki_dup2(int oldfd, int newfd) {
   int rv;
@@ -437,13 +438,13 @@ static int eiki_dup2(int oldfd, int newfd) {
 }
 
 /**
- * Run the program `file` with the arguments `argv`. Returns its output as a
- * string allocated using `eiki_malloc()` if successful, and NULL otherwise.
+ * Run the program `file` with the arguments `argv`. Returns a pipe file
+ * descriptor from which `file`'s stdout can be read if successful, and -1
+ * otherwise.
  */
-static char *eiki_execv(const char *file, char *const argv[]) {
+static int eiki_execv_fd(const char *file, char *const argv[]) {
   int pipe_fd[2] = { -1, -1 };
   int rv;
-  char *buf = NULL;
   pid_t pid;
   rv = pipe(pipe_fd);
   if (rv) {
@@ -467,8 +468,6 @@ static char *eiki_execv(const char *file, char *const argv[]) {
     _exit(EXIT_FAILURE);
   } else { /* In parent */
     int status;
-    int pipe_len;
-    ssize_t sz;
     eiki_close(pipe_fd[1]);
     pipe_fd[1] = -1;
     rv = (int)waitpid(pid, &status, 0);
@@ -478,33 +477,20 @@ static char *eiki_execv(const char *file, char *const argv[]) {
     if (WEXITSTATUS(status) == EXIT_FAILURE) {
       goto fail;
     }
-    rv = ioctl(pipe_fd[0], FIONREAD, &pipe_len);
-    if (rv) {
-      goto fail;
-    }
-    buf = eiki_malloc(pipe_len + 1);
-    if (!buf) {
-      goto fail;
-    }
-    sz = eiki_read(pipe_fd[0], buf, pipe_len);
-    if (sz < 0) {
-      goto fail;
-    }
-    buf[sz] = '\0';
-    eiki_close(pipe_fd[0]);
-    return buf;
+    return pipe_fd[0];
   }
 
 fail:
-  eiki_free(buf);
   if (pipe_fd[0] >= 0) {
     eiki_close(pipe_fd[0]);
   }
   if (pipe_fd[1] >= 0) {
     eiki_close(pipe_fd[1]);
   }
-  return NULL;
+  return -1;
 }
+
+#endif /* EIKI_NO_BINUTILS */
 
 /**
  * Run the program `file` with the arguments `argv` asynchronously, and return
@@ -1172,7 +1158,7 @@ end:
   eiki_free(argv[0]);
   eiki_free(argv[1]);
   eiki_free(argv[2]);
-  return (gdb_pid != -1);
+  return (gdb_pid != -1) ? 0 : -1;
 }
 
 /*****************************************************************************
@@ -1180,7 +1166,7 @@ end:
  *****************************************************************************/
 
 /**
- * Read a line emitted by backtrace_symbols_fd. Each line is of the form
+ * Read a line emitted by backtrace_symbols. Each line is of the form
  *
  *     module(name+offset) [address]
  *
@@ -1189,61 +1175,50 @@ end:
  * the given part is present, the pointed-to pointer is set to a string
  * containing that part, dynamically allocated using `eiki_malloc()`. If the
  * given part is not present, the pointed-to pointer is set to null. If a line
- * is successfully read, returns 0, and `fd` is advanced to the next line.
- * Otherwise, returns -1, all allocated memory is freed, `fd` is restored to
- * its original position, and all pointed-to pointers are unmodified.
+ * is successfully read, returns 0. Otherwise, returns -1, all allocated memory
+ * is freed, and all pointed-to pointers are unmodified.
  */
-static int eiki_read_backtrace_symbols_line(int fd, char **module, char **name,
-    char **offset, char **address) {
-  off_t orig_pos, eol_pos;
+static int eiki_read_backtrace_symbols_line(const char *line, char **module,
+    char **name, char **offset, char **address) {
   /* [0] => module, [1] => name, [2] => offset, [3] => address */
-  off_t pos[4];
+  size_t pos[4] = { 0, 0, 0, 0 };
   size_t len[4] = { 0, 0, 0, 0 };
   char *str[4] = { NULL, NULL, NULL, NULL };
   size_t *cur_len = &len[0];
+  size_t cur_pos = 0;
   int i;
-  /* Remember where we started */
-  orig_pos = lseek(fd, 0, SEEK_CUR);
-  pos[0] = orig_pos;
+
   /* Do a first pass to measure the length of everything */
-  while (1) {
-    char c;
-    ssize_t sz = eiki_read(fd, &c, 1);
-    if (sz < 0) {
-      goto fail;
-    } else if (sz == 0) {
-      /* EOF */
-      break; /* goto end_of_line; */
-    } else {
-      switch (c) {
-        case '(':
-          cur_len = &len[1];
-          pos[1] = lseek(fd, 0, SEEK_CUR);
-          break;
-        case '+':
-          cur_len = &len[2];
-          pos[2] = lseek(fd, 0, SEEK_CUR);
-          break;
-        case '[':
-          cur_len = &len[3];
-          pos[3] = lseek(fd, 0, SEEK_CUR);
-          break;
-        case ')':
-        case ' ':
-        case ']':
-          cur_len = NULL;
-          break;
-        case '\n':
-          goto end_of_line;
-        default:
-          if (cur_len) {
-            (*cur_len)++;
-          }
-      }
+  while (line[cur_pos]) {
+    /* Value for pos[] below depend on this postincrement */
+    switch (line[cur_pos++]) {
+      case '(':
+        cur_len = &len[1];
+        pos[1] = cur_pos;
+        break;
+      case '+':
+        cur_len = &len[2];
+        pos[2] = cur_pos;
+        break;
+      case '[':
+        cur_len = &len[3];
+        pos[3] = cur_pos;
+        break;
+      case ')':
+      case ' ':
+      case ']':
+        cur_len = NULL;
+        break;
+      case '\n':
+        goto end_of_line;
+      default:
+        if (cur_len) {
+          (*cur_len)++;
+        }
     }
   }
+
 end_of_line:
-  eol_pos = lseek(fd, 0, SEEK_CUR);
   /* Force length to 0 for anything the user doesn't want */
   if (!module) {
     len[0] = 0;
@@ -1260,17 +1235,12 @@ end_of_line:
   /* Read out everything available */
   for (i = 0; i < 4; i++) {
     if (len[i]) {
-      ssize_t sz;
       str[i] = eiki_malloc(len[i] + 1);
       if (!str[i]) {
-        goto fail;
+        continue;
       }
-      lseek(fd, pos[i], SEEK_SET);
-      sz = eiki_read(fd, str[i], len[i]);
-      if (sz < 0) {
-        goto fail;
-      }
-      str[i][sz] = '\0';
+      eiki_memcpy(str[i], line + pos[i], len[i]);
+      str[i][len[i]] = '\0';
     }
   }
   /* Done */
@@ -1286,119 +1256,46 @@ end_of_line:
   if (address) {
     *address = str[3];
   }
-  lseek(fd, eol_pos, SEEK_SET);
   return 0;
-
-fail:
-  for (i = 0; i < 4; i++) {
-    eiki_free(str[i]);
-  }
-  lseek(fd, orig_pos, SEEK_SET);
-  return -1;
 }
 
 /**
- * Try to set the `name` field of the given stack frame. `addr` must be
- * non-null, and `*addr` must be the address of the instruction being probed in
- * hexadecimal, with or without the 0x prefix.
+ * Try to set the `name` field (if not set) and `src` field of the given stack
+ * frame. `addr` must be non-null, and `*addr` must be the address of the
+ * instruction being probed in hexadecimal, with or without the 0x prefix.
  */
-static void eiki_fill_stack_frame_name(eiki_stack_frame *frame, char *addr) {
+static void eiki_improve_stack_frame(eiki_stack_frame *frame, char *addr) {
 #ifdef EIKI_NO_BINUTILS
   (void)frame;
   (void)addr;
   return;
 #else
-  char pid_str[] = "-2147483648";
-  char *argv[] = { NULL, NULL, NULL, NULL, NULL };
-  /* If this assertion fails, the length of pid_str and argv[2] below need to
+  /* If this assertion fails, the length of pid_str and argv_2 below need to
    * be increased. */
   EIKI_STATIC_ASSERT(sizeof(pid_t) * CHAR_BIT <= 32);
+  char pid_str[] = "-2147483648";
   /* This is necessary because `execve(2)` needs an array of pointers to
-   * *mutable* char. (But we don't bother making copies for argv[3] because any
-   * changes will actually be made in a fork.) */
-  argv[0] = eiki_malloc(10);
-  if (!argv[0]) {
-    goto end;
-  }
-  eiki_strcpy(argv[0], "addr2line");
-  argv[1] = eiki_malloc(5);
-  if (!argv[1]) {
-    goto end;
-  }
-  eiki_strcpy(argv[1], "-fse");
-  argv[2] = eiki_malloc(21);
-  if (!argv[2]) {
-    goto end;
-  }
-  eiki_strcpy(argv[2], "/proc/");
+   * *mutable* char. */
+  char argv_0[] = "addr2line";
+  char argv_1[] = EIKI_ADDR2LINE_FLAGS;
+  char argv_2[] = "/proc/-2147483648/exe";
+  char *argv[] = { argv_0, argv_1, argv_2, addr, NULL };
+  int fd;
+  eiki_strcpy(argv_2, "/proc/");
   eiki_pid_to_str(getpid(), pid_str);
-  eiki_strcat(argv[2], pid_str);
-  eiki_strcat(argv[2], "/exe");
+  eiki_strcat(argv_2, pid_str);
+  eiki_strcat(argv_2, "/exe");
   argv[3] = addr;
-  frame->name = eiki_execv(EIKI_ADDR2LINE_PATH, argv);
-  if (frame->name) {
-    /* Truncate at the first newline */
-    char *ptr;
-    ptr = frame->name;
-    while (*ptr && *ptr != '\n') {
-      ptr++;
+  fd = eiki_execv_fd(EIKI_ADDR2LINE_PATH, argv);
+  if (fd >= 0) {
+    if (!frame->name) {
+      frame->name = eiki_readln(fd);
+    } else {
+      eiki_free(eiki_readln(fd));
     }
-    *ptr = '\0';
+    frame->src = eiki_readln(fd);
+    eiki_close(fd);
   }
-end:
-  eiki_free(argv[0]);
-  eiki_free(argv[1]);
-  eiki_free(argv[2]);
-#endif /* EIKI_NO_BINUTILS */
-}
-
-/**
- * Try to set the `src` field of the given stack frame. `addr` must be
- * non-null, and `*addr` must be the address of the instruction being probed in
- * hexadecimal, with or without the 0x prefix.
- */
-static void eiki_fill_stack_frame_src(eiki_stack_frame *frame, char *addr) {
-#ifdef EIKI_NO_BINUTILS
-  (void)frame;
-  (void)addr;
-  return;
-#else
-  char pid_str[] = "-2147483648";
-  char *argv[] = { NULL, NULL, NULL, NULL, NULL };
-  /* If this assertion fails, the length of pid_str and argv[2] below need to
-   * be increased. */
-  EIKI_STATIC_ASSERT(sizeof(pid_t) * CHAR_BIT <= 32);
-  /* This is necessary because `execve(2)` needs an array of pointers to
-   * *mutable* char. (But we don't bother making copies for argv[3] because any
-   * changes will actually be made in a fork.) */
-  argv[0] = eiki_malloc(10);
-  if (!argv[0]) {
-    goto end;
-  }
-  eiki_strcpy(argv[0], "addr2line");
-  argv[1] = eiki_malloc(4); /* The longer possibility, "-se", is 3+1 bytes */
-  if (!argv[1]) {
-    goto end;
-  }
-  eiki_strcpy(argv[1], EIKI_ADDR2LINE_SRC_FLAGS);
-  argv[2] = eiki_malloc(21);
-  if (!argv[2]) {
-    goto end;
-  }
-  eiki_strcpy(argv[2], "/proc/");
-  eiki_pid_to_str(getpid(), pid_str);
-  eiki_strcat(argv[2], pid_str);
-  eiki_strcat(argv[2], "/exe");
-  argv[3] = addr;
-  frame->src = eiki_execv(EIKI_ADDR2LINE_PATH, argv);
-  if (frame->src) {
-    /* Remove the newline */
-    frame->src[eiki_strlen(frame->src)-1] = '\0';
-  }
-end:
-  eiki_free(argv[0]);
-  eiki_free(argv[1]);
-  eiki_free(argv[2]);
 #endif /* EIKI_NO_BINUTILS */
 }
 
@@ -1410,33 +1307,26 @@ end:
 static char *eiki_cxx_demangle(const char *mangled) {
 #ifdef EIKI_NO_BINUTILS
   (void)mangled;
-  (void)length;
-  (void)status;
   return NULL;
 #else
-  char *argv[] = { NULL, NULL, NULL };
+  char argv_0[] = "c++filt";
+  char *argv[] = { argv_0, NULL, NULL };
   char *buf = NULL;
+  int fd = -1;
   if (!mangled) {
     return NULL;
   }
-  /* See `eiki_fill_stack_frame_src()` for an explanation. */
-  argv[0] = eiki_malloc(8);
-  if (!argv[0]) {
-    goto end;
-  }
-  eiki_strcpy(argv[0], "c++filt");
   argv[1] = eiki_malloc(eiki_strlen(mangled) + 1);
   if (!argv[1]) {
     goto end;
   }
   eiki_strcpy(argv[1], mangled);
-  buf = eiki_execv(EIKI_CXXFILT_PATH, argv);
-  if (buf) {
-    /* Remove the newline */
-    buf[eiki_strlen(buf)-1] = '\0';
+  fd = eiki_execv_fd(EIKI_CXXFILT_PATH, argv);
+  if (fd >= 0) {
+    buf = eiki_readln(fd);
+    eiki_close(fd);
   }
 end:
-  eiki_free(argv[0]);
   eiki_free(argv[1]);
   return buf;
 #endif /* EIKI_NO_BINUTILS */
@@ -1453,8 +1343,8 @@ eiki_stack_frame *eiki_get_stack_trace(size_t max_depth, size_t skip_count,
   size_t max_addr_frames;
   size_t addr_frames;
   size_t frames;
-  int temp_fd = -1;
-  char temp_filename[] = EIKI_STACK_TRACE_TEMP;
+  int pipe_fd[] = { -1, -1 };
+  int rv;
   /* Check if the user can follow instructions */
   if (!depth) {
     return NULL;
@@ -1472,13 +1362,15 @@ eiki_stack_frame *eiki_get_stack_trace(size_t max_depth, size_t skip_count,
     goto fail;
   }
   frames = addr_frames - skip_count;
-  /* Write the symbols out to a temporary file since backtrace_symbols() uses
+  /* Write the symbols out to a temporary pipe since backtrace_symbols() uses
    * malloc() */
-  temp_fd = mkstemp(temp_filename);
-  if (temp_fd < 0) {
+  rv = pipe(pipe_fd);
+  if (rv) {
     goto fail;
   }
-  backtrace_symbols_fd(addr_buffer + skip_count, frames, temp_fd);
+  backtrace_symbols_fd(addr_buffer + skip_count, frames, pipe_fd[1]);
+  eiki_close(pipe_fd[1]);
+  pipe_fd[1] = -1;
   /* Allocate and initialize the stack trace array */
   stack_trace = eiki_malloc(frames * sizeof(*stack_trace));
   if (!stack_trace) {
@@ -1494,21 +1386,22 @@ eiki_stack_frame *eiki_get_stack_trace(size_t max_depth, size_t skip_count,
   /* Done with the address buffer, free it now so we have more free memory */
   eiki_free(addr_buffer);
   addr_buffer = NULL;
-  /* Rewind back to the beginning of the file and read it back */
-  lseek(temp_fd, 0, SEEK_SET);
+  /* Read the stack trace symbols line-by-line */
   for (i = 0; i < frames; i++) {
+    char *line;
     char *addr_str = NULL;
-    int rv = eiki_read_backtrace_symbols_line(temp_fd,
-        &stack_trace[i].module, &stack_trace[i].name,
-        &stack_trace[i].offset, &addr_str);
+    int rv;
+    line = eiki_readln(pipe_fd[0]);
+    if (!line) {
+      goto fail;
+    }
+    rv = eiki_read_backtrace_symbols_line(line, &stack_trace[i].module,
+        &stack_trace[i].name, &stack_trace[i].offset, &addr_str);
     if (rv) {
       goto fail;
     }
     if (addr_str) {
-      if (!stack_trace[i].name) {
-        eiki_fill_stack_frame_name(&stack_trace[i], addr_str);
-      }
-      eiki_fill_stack_frame_src(&stack_trace[i], addr_str);
+      eiki_improve_stack_frame(&stack_trace[i], addr_str);
       eiki_free(addr_str);
     }
 #ifndef EIKI_NO_STACK_TRACE_DEMANGLE
@@ -1523,15 +1416,16 @@ eiki_stack_frame *eiki_get_stack_trace(size_t max_depth, size_t skip_count,
 #endif
   }
   /* Done */
-  eiki_close(temp_fd);
-  unlink(temp_filename);
+  eiki_close(pipe_fd[0]);
   *depth = frames;
   return stack_trace;
 
 fail:
-  if (temp_fd >= 0) {
-    eiki_close(temp_fd);
-    unlink(temp_filename);
+  if (pipe_fd[0] >= 0) {
+    eiki_close(pipe_fd[0]);
+  }
+  if (pipe_fd[1] >= 0) {
+    eiki_close(pipe_fd[1]);
   }
   if (stack_trace) {
     eiki_free_stack_trace(stack_trace, frames);
