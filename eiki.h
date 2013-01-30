@@ -134,12 +134,19 @@ void eiki_abort();
  *****************************************************************************/
 
 /**
- * Drop into a debugger, even if we were not run from one. If successful,
- * `eiki_gdb()` will not return until the debugger terminates. If
- * unsuccessful, `eiki_gdb()` will return immediately. Returns 0 on success and
- * -1 on failure.
+ * If a debugger is not already attached to this process, spawn a debugger and
+ * attach it by invoking the command line
+ *
+ *     EIKI_DEBUGGER_PATH /proc/(pid)/exe (pid)
+ *
+ * If successful, `eiki_gdb()` will not return until the debugger terminates.
+ * If unsuccessful, `eiki_gdb()` will return immediately. Returns 0 on success,
+ * -1 on failure, and -2 if a debugger is already attached.
  */
-int eiki_gdb();
+int eiki_attach_debugger();
+
+/** Deprecated. Legacy name for `eiki_attach_debugger()`. */
+void eiki_gdb();
 
 /*****************************************************************************
  * Stack traces

@@ -12,7 +12,7 @@ Requirements
 
 - glibc 2.1 or newer, for `backtrace(3)`.
 
-- POSIX.1-2001, for `mkstemp(3)`.
+- POSIX.1-2008, for `strsignal(3)`.
 
 - Optionally, `addr2line(1)` and `c++filt(1)` from `binutils` at runtime.
 
@@ -27,7 +27,8 @@ features are required in your stack traces and whether or not Eiki can use
 `addr2line(1)` and `c++filt(1)`, you may need to compile with debug symbols
 (`-g`) and/or link with `-rdynamic`; see "Stack Traces" below.
 
-The following preprocessor flags affect Eiki's behavior:
+Eiki's behavior is controlled by the following preprocessor flags at the time
+eiki.c is compiled:
 
 - If EIKI\_NO\_BINUTILS is defined, `eiki_get_stack_trace()` will not attempt
   to use `c++filt(1)` to perform name demangling and `addr2line(1)` to perform
@@ -47,22 +48,20 @@ The following preprocessor flags affect Eiki's behavior:
   not configure an alternate stack for `eiki_signal_handler()`, which means
   that stack overflows cannot be handled.
 
-- If EIKI\_GDB\_IF\_TTY is defined, `eiki_signal_handler()` will attempt to
-  drop into GDB before aborting.
+- If EIKI\_SIGNAL\_HANDLER\_DEBUGGER is defined, `eiki_signal_handler()` will
+  attempt to drop into a debugger before aborting, provided that standard input
+  is a tty and Eiki does not detect an existing debugger.
 
 - EIKI\_PRINT\_STACK\_FRAMES defines the maximum number of stack frames that
   will be shown by `eiki_print_stack_trace()`. The default is 64.
-
-- EIKI\_STACK\_TRACE\_TEMP defines the filename template for the temporary file
-  created while generating stack traces, and (per `mkstemp(3)`) must end in
-  "XXXXXX". The default is "/tmp/eiki\_stack\_trace\_XXXXXX".
 
 - EIKI\_ADDR2LINE\_PATH and EIKI\_CXXFILT\_PATH define the pathnames of
   `addr2line(1)` and `c++filt(1)` respectively, and default to
   EIKI\_BINUTILS\_DIR + "addr2line" and EIKI\_BINUTILS\_DIR + "c++filt", where
   EIKI\_BINUTILS\_DIR defaults to "/usr/bin/".
 
-- EIKI\_GDB\_PATH defines the pathname of `gdb(1)`. Defaults to "/usr/bin/gdb".
+- EIKI\_DEBUGGER\_PATH defines the pathname of the debugger invoked by
+  `eiki_attach_debugger()`. Defaults to "/usr/bin/gdb" (`gdb(1)`).
 
 Stack Traces
 ------------

@@ -24,6 +24,12 @@
 /* Required for `stack_t` and `strsignal(3)` */
 #define _POSIX_C_SOURCE 200809L
 
+#if defined(__linux__) || \
+    (defined(__APPLE__) && defined(__MACH__)) || \
+    defined(BSD)
+  #include <sys/ptrace.h>
+#endif
+
 #include <execinfo.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -51,11 +57,6 @@
   #define EIKI_PRINT_STACK_FRAMES 64
 #endif
 
-/** Stack trace temporary filename template. */
-#ifndef EIKI_STACK_TRACE_TEMP
-  #define EIKI_STACK_TRACE_TEMP "/tmp/eiki_stack_trace_XXXXXX"
-#endif
-
 #ifdef EIKI_SRC_PATHNAMES
   #define EIKI_ADDR2LINE_FLAGS "-fe"
 #else
@@ -76,9 +77,19 @@
   #define EIKI_CXXFILT_PATH EIKI_BINUTILS_DIR "c++filt"
 #endif
 
-/** Path to `gdb(1)`. */
-#ifndef EIKI_GDB_PATH
-  #define EIKI_GDB_PATH "/usr/bin/gdb"
+/** Deprecated legacy name for `EIKI_SIGNAL_HANDLER_DEBUGGER`. */
+#ifdef EIKI_GDB_IF_TTY
+  #define EIKI_SIGNAL_HANDLER_DEBUGGER
+#endif
+
+/** Deprecated legacy name for `EIKI_DEBUGGER_PATH`. */
+#ifdef EIKI_GDB_PATH
+  #define EIKI_DEBUGGER_PATH EIKI_GDB_PATH
+#endif
+
+/** Path to the debugger invoked by `eiki_attach_debugger()`. */
+#ifndef EIKI_DEBUGGER_PATH
+  #define EIKI_DEBUGGER_PATH "/usr/bin/gdb"
 #endif
 
 /*****************************************************************************
@@ -1070,7 +1081,7 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
   eiki_print_pid_prefix(); eiki_print_signal(signum, info);
   eiki_print_pid_prefix(); eiki_print_stack_trace(0);
   eiki_print_pid_prefix(); eiki_print_context(context);
-#ifdef EIKI_GDB_IF_TTY
+#ifdef EIKI_SIGNAL_HANDLER_DEBUGGER
   if (eiki_stdin_is_tty()) {
     eiki_gdb();
   }
@@ -1122,18 +1133,72 @@ void eiki_abort() {
  * Debugger support
  *****************************************************************************/
 
-int eiki_gdb() {
-  pid_t gdb_pid = -1;
+/**
+ * Returns 1 if this process is already in a debugger, 0 if the process is not
+ * already in a debugger, and -1 if an error occurs.
+ */
+static int eiki_is_debugged() {
+#ifdef __linux__
+  pid_t pid = fork();
+  if (pid < 0) {
+    return -1;
+  } else if (!pid) { /* In child */
+    pid_t ppid = getppid();
+    if (ptrace(PTRACE_ATTACH, ppid, NULL, NULL)) {
+      /* Debugger present */
+      _exit(1);
+    }
+    /* Debugger not present */
+    /* Wait for SIGSTOP from PTRACE_ATTACH to take effect */
+    waitpid(ppid, NULL, 0);
+    /* Continue and detach the parent */
+    ptrace(PTRACE_DETACH, ppid, NULL, NULL);
+    _exit(0);
+  } else { /* In parent */
+    int status;
+    waitpid(pid, &status, 0);
+    return WEXITSTATUS(status);
+  }
+#elif (defined(__APPLE__) && defined(__MACH__)) || defined(BSD)
+  pid_t pid = fork();
+  if (pid < 0) {
+    return -1;
+  } else if (!pid) { /* In child */
+    pid_t ppid = getppid();
+    if (ptrace(PT_ATTACH, ppid, 0, 0)) {
+      /* Debugger present */
+      _exit(1);
+    }
+    /* Debugger not present */
+    /* Continue and detach the parent */
+    ptrace(PT_DETACH, ppid, 0, 0);
+    _exit(0);
+  } else { /* In parent */
+    int status;
+    waitpid(pid, &status, 0);
+    return WEXITSTATUS(status);
+  }
+#else
+  return -1;
+#endif
+}
+
+int eiki_attach_debugger() {
+  pid_t debugger_pid = -1;
   pid_t pid;
   char pid_str[16];
   char *argv[] = { NULL, NULL, NULL, NULL };
 
-  /* construct command line: gdb <my_binary> <my_pid> */
-  argv[0] = eiki_malloc(4);
+  if (eiki_is_debugged() > 0) {
+    return -2;
+  }
+
+  /* construct command line: EIKI_DEBUGGER_PATH <my_binary> <my_pid> */
+  argv[0] = eiki_malloc(eiki_strlen(EIKI_DEBUGGER_PATH)+1);
   if (!argv[0]) {
     goto end;
   }
-  eiki_strcpy(argv[0], "gdb");
+  eiki_strcpy(argv[0], EIKI_DEBUGGER_PATH);
   argv[1] = eiki_malloc(32);
   if (!argv[1]) {
     goto end;
@@ -1149,16 +1214,20 @@ int eiki_gdb() {
   }
   eiki_strcpy(argv[2], pid_str);
 
-  gdb_pid = eiki_execv_async(EIKI_GDB_PATH, argv);
-  if (gdb_pid != -1) {
-    waitpid(gdb_pid, NULL, 0);
+  debugger_pid = eiki_execv_async(EIKI_DEBUGGER_PATH, argv);
+  if (debugger_pid != -1) {
+    waitpid(debugger_pid, NULL, 0);
   }
 
 end:
   eiki_free(argv[0]);
   eiki_free(argv[1]);
   eiki_free(argv[2]);
-  return (gdb_pid != -1) ? 0 : -1;
+  return (debugger_pid != -1) ? 0 : -1;
+}
+
+void eiki_gdb() {
+  eiki_attach_debugger();
 }
 
 /*****************************************************************************
@@ -1270,8 +1339,7 @@ static void eiki_improve_stack_frame(eiki_stack_frame *frame, char *addr) {
   (void)addr;
   return;
 #else
-  /* If this assertion fails, the length of pid_str and argv_2 below need to
-   * be increased. */
+  /* If this assertion fails, pid_str and argv_2 need to be modified. */
   EIKI_STATIC_ASSERT(sizeof(pid_t) * CHAR_BIT <= 32);
   char pid_str[] = "-2147483648";
   /* This is necessary because `execve(2)` needs an array of pointers to
