@@ -1,6 +1,6 @@
 /*
  * eiki.c - Crash handling toolkit
- * Copyright (C) 2012 Jamie Liu
+ * Copyright (C) 2012-2013 Jamie Liu
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
