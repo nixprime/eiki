@@ -1109,7 +1109,9 @@ int eiki_install_signal_handler() {
     return -1;
   }
 #endif
-  action.sa_handler = (void (*)(int))eiki_signal_handler;
+  /* Cast away parameter constness */
+  action.sa_sigaction = (void (*)(int, siginfo_t *, void *))
+    eiki_signal_handler;
   sigemptyset(&action.sa_mask);
   action.sa_flags = SA_SIGINFO;
 #ifndef EIKI_NO_SIGNAL_STACK
