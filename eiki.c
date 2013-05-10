@@ -272,6 +272,10 @@ typedef union {
 #endif
 } eiki_heap_min_type;
 
+#ifndef __BIGGEST_ALIGNMENT__
+  #define __BIGGEST_ALIGNMENT__ 16
+#endif
+
 typedef struct {
   eiki_heap_min_type x[EIKI_HEAP_BLOCK_SIZE/sizeof(eiki_heap_min_type)];
 } eiki_heap_block;
@@ -1076,6 +1080,15 @@ void eiki_print_context(const ucontext_t *context) {
   (void)i;
 }
 
+/**
+ * Unregister the signal handler for the given signal, then kill the current
+ * process using that signal.
+ */
+static void eiki_reraise_signal(int signum) {
+  signal(signum, SIG_DFL);
+  kill(getpid(), signum);
+}
+
 void eiki_signal_handler(int signum, const siginfo_t *info,
     const ucontext_t *context) {
   eiki_print_pid_prefix(); eiki_print_signal(signum, info);
@@ -1086,7 +1099,7 @@ void eiki_signal_handler(int signum, const siginfo_t *info,
     eiki_gdb();
   }
 #endif
-  eiki_abort();
+  eiki_reraise_signal(signum);
 }
 
 int eiki_install_signal_handler() {

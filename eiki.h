@@ -106,7 +106,7 @@ void eiki_print_context(const ucontext_t *context);
  * - Calls `eiki_print_stack_trace(0)`.
  * - Calls `eiki_print_context(context)`.
  * - If EIKI_GDB_IF_TTY is defined and stdin is a tty, calls `eiki_gdb()`.
- * - Calls `abort()`.
+ * - Reraises the signal with the default handler.
  */
 void eiki_signal_handler(int signum, const siginfo_t *info,
     const ucontext_t *context);
